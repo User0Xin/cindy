@@ -22,6 +22,7 @@ import {
   promptSafeSourceName,
 } from '@cindy/maker-shared/message-source';
 
+import { projectCompanionHandoffHistory } from '../localDb/projectCompanionTranscript.js';
 import { imChannelDisplayName } from '../../shared/imMessageSource.js';
 
 /** DB 层引擎标识(sessions.agent_kind / messages.agent_kind 的值域)。 */
@@ -32,6 +33,7 @@ export interface HandoffSourceMessage {
   role: string;
   content: unknown;
   createdAt: number; // unix ms
+  projectCompanionHistory?: boolean;
   /** 生产 tool_result 的关联列；content 经常是纯字符串，不能靠信封里的 toolUseId。 */
   toolUseId?: string | null;
   /**
@@ -524,11 +526,12 @@ function splitTurns(messages: HandoffSourceMessage[], includeToolResults = true)
       case 'assistant': {
         const text = extractPlainText(msg.content);
         if (text) {
-          const groupSource = readMessageSourceGroup(parseJsonObjectString(msg.agentMeta))
-            ? describeHandoffUserSource(msg) : null;
-          const label = groupSource ? `[Assistant · ${groupSource}]` : '[Assistant]';
+          const meta = asRecord(parseJsonObjectString(msg.agentMeta));
+          const groupSource = readMessageSourceGroup(meta) ? describeHandoffUserSource(msg) : null;
+          const author = promptSafeSourceName(asRecord(meta?.projectCompanion)?.displayName) ?? groupSource;
+          const label = author ? `[Assistant · ${author}]` : '[Assistant]';
           current.detailLines.push(`${label}\n${excerpt(text, RECENT_TEXT_CAP)}`);
-          current.lastAssistantText = groupSource ? `${label} ${text}` : text;
+          current.lastAssistantText = author ? `${label} ${text}` : text;
         }
         break;
       }
@@ -656,6 +659,10 @@ export function buildHandoffText(
   messages: HandoffSourceMessage[],
   opts: BuildHandoffOptions,
 ): string {
+  // Recovery decisions use raw errors and input provenance. Only visible words enter the next conversation.
+  if (messages.some(row => row.projectCompanionHistory)) messages = projectCompanionHandoffHistory(messages);
+  if (opts.workStateMessages?.some(row => row.projectCompanionHistory))
+    opts = { ...opts, workStateMessages: projectCompanionHandoffHistory(opts.workStateMessages) };
   const turns = splitTurns(messages, opts.includeToolResults);
   // 超出硬上限时逐档收缩逐字区(4→3→2→1 轮)重组——绝不能从尾部硬切:
   // 检索指引与结束标记在尾部,是最不能丢的段。收缩到 1 轮仍超限才走最后的
